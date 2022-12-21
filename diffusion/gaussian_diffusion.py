@@ -276,6 +276,10 @@ class GaussianDiffusion:
 
         B, C = x.shape[:2]
         assert t.shape == (B,)
+        # print('x shape, size', x.shape, x.size(), x.dtype)
+        # print('x', x)
+        # print('t shape, size', t.shape, t.size(), t.dtype)
+        # print('t', t)
         model_output = model(x, t, **model_kwargs)
         if isinstance(model_output, tuple):
             model_output, extra = model_output

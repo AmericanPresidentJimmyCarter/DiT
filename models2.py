@@ -9,6 +9,7 @@ import torch.nn as nn
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+from einops import rearrange
 
 
 def modulate(x, shift, scale):
@@ -16,8 +17,50 @@ def modulate(x, shift, scale):
 
 
 #################################################################################
-#               Embedding Layers for Timesteps and Class Labels                 #
+#               Embedding Layers for Timesteps and Conditioning                 #
 #################################################################################
+
+class Attention2D(nn.Module):
+    def __init__(self, x_sz, c_sz, nhead=16):
+        super().__init__()
+
+        self.proj_in = nn.Conv2d(
+            x_sz,
+            c_sz,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
+
+        self.proj_out = nn.Conv2d(
+            c_sz,
+            x_sz,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
+
+        self.ln = nn.LayerNorm(x_sz)
+        self.ln_out = nn.LayerNorm(x_sz)
+        self.attn = torch.nn.MultiheadAttention(c_sz, nhead, bias=True, batch_first=True)
+
+    def forward(self, x, c):
+        norm_x = self.ln(x)
+        norm_x = norm_x.unsqueeze(0)
+        norm_x = rearrange(norm_x, 'a b c d -> a d c b')
+        # print('norm_x', norm_x.size())
+        shaped_x = self.proj_in(norm_x)
+        shaped_x = shaped_x.squeeze(0)
+        shaped_x = rearrange(shaped_x, 'a b c -> c b a')
+        x_out = self.attn(c, shaped_x, shaped_x, need_weights=False)[0]
+        x_out = rearrange(shaped_x, 'c b a -> a b c')
+        x_out = x_out.unsqueeze(0)
+        reshaped_x = self.proj_out(x_out)
+        reshaped_x = rearrange(reshaped_x, 'a d c b -> a b c d')
+        reshaped_x = reshaped_x.squeeze(0)
+        renorm_x = self.ln_out(reshaped_x)
+        return renorm_x
+
 
 class TimestepEmbedder(nn.Module):
     """
@@ -152,6 +195,9 @@ class DiT(nn.Module):
         class_dropout_prob=0.1,
         num_classes=1000,
         learn_sigma=True,
+        model_channels=320,
+        transformer_depth=1,
+        context_dim=2048,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -162,14 +208,16 @@ class DiT(nn.Module):
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        # self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
-        self.blocks = nn.ModuleList([
+        self.blocks = nn.ModuleList([Attention2D(hidden_size, context_dim, num_heads)])
+        self.blocks.extend(nn.ModuleList([
             DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
-        ])
+        ]))
+        
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
 
@@ -191,7 +239,7 @@ class DiT(nn.Module):
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
         # Initialize label embedding table:
-        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+        # nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
@@ -199,14 +247,16 @@ class DiT(nn.Module):
 
         # Zero-out adaLN modulation layers in DiT blocks:
         for block in self.blocks:
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+            if isinstance(block, DiTBlock):
+                nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+                nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
         # Zero-out output layers:
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
+        if isinstance(block, DiTBlock):
+            nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(self.final_layer.linear.weight, 0)
+            nn.init.constant_(self.final_layer.linear.bias, 0)
 
     def unpatchify(self, x):
         """
@@ -223,31 +273,38 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, y):
+    def forward(self, x, t, conditioning):
         """
         Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
         """
+        # print(self.x_embedder(x).size(), self.x_embedder(x).dtype)
+        # print(self.pos_embed.size(), self.pos_embed.dtype)
+        # x = self.blocks[0](x, conditioning)
+
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(t)                   # (N, D)
-        y = self.y_embedder(y, self.training)    # (N, D)
-        c = t + y                                # (N, D)
+        # y = self.y_embedder(y, self.training)    # (N, D)
+        c = t                                # (N, D)
         for block in self.blocks:
-            x = block(x, c)                      # (N, T, D)
+            if isinstance(block, Attention2D):
+                x = block(x, conditioning)
+            if isinstance(block, DiTBlock):
+                x = block(x, c)                      # (N, T, D)
         x = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         return x
 
-    def forward_with_cfg(self, x, t, y, cfg_scale):
+    def forward_with_cfg(self, x, t, conditioning, cfg_scale):
         """
         Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
+        model_out = self.forward(combined, t, conditioning)
         eps, rest = model_out[:, :3], model_out[:, 3:]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
@@ -313,60 +370,30 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #                                   DiT Configs                                  #
 #################################################################################
 
-def DiT_XL_2(**kwargs):
-    return DiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
+def DiT_XL_2_CA(**kwargs):
+    return DiT(depth=28, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
 
-def DiT_XL_4(**kwargs):
-    return DiT(depth=28, hidden_size=1152, patch_size=4, num_heads=16, **kwargs)
-
-def DiT_XL_8(**kwargs):
-    return DiT(depth=28, hidden_size=1152, patch_size=8, num_heads=16, **kwargs)
-
-def DiT_L_2(**kwargs):
-    return DiT(depth=24, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
-
-def DiT_L_4(**kwargs):
-    return DiT(depth=24, hidden_size=1024, patch_size=4, num_heads=16, **kwargs)
-
-def DiT_L_8(**kwargs):
-    return DiT(depth=24, hidden_size=1024, patch_size=8, num_heads=16, **kwargs)
-
-def DiT_B_2(**kwargs):
-    return DiT(depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
-
-def DiT_B_4(**kwargs):
-    return DiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs)
-
-def DiT_B_8(**kwargs):
-    return DiT(depth=12, hidden_size=768, patch_size=8, num_heads=12, **kwargs)
-
-def DiT_S_2(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
-
-def DiT_S_4(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)
-
-def DiT_S_8(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
-
+def DiT_S_2_CA(**kwargs):
+    return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=16, **kwargs)
 
 if __name__ == "__main__":
-    NUM_IMAGES = 4
+    NUM_IMAGES = 2
     IMAGE_SIZE = 256
     device = "cuda"
-    model = DiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16) # .to(device)
-    # print(sum([p.numel() for p in model.parameters()]))
+    model = DiT(input_size=IMAGE_SIZE // 8, depth=28, hidden_size=1152, patch_size=2, num_heads=16) # .to(device)
+    print(f"Number of Parameters: {sum([p.numel() for p in model.parameters()])}")
     x_random = torch.rand(NUM_IMAGES, 4, IMAGE_SIZE // 8, IMAGE_SIZE // 8) # .to(device)
+    print('in', x_random.size())
     # c_random = torch.randn((1, 2048)).to(device)
     timestep_random = torch.randint(1, 250, (NUM_IMAGES,)) # .to(device)
-    class_random = torch.randint(0, 1024, (NUM_IMAGES,)) #.to(device)
+    c_full_random = torch.randn((NUM_IMAGES, 77, 2048)) # .to(device)
     # c_full_random = torch.randn((1, 77, 2048)).to(device)
     # print('x random', x_random.size())
-    out = model(x_random, timestep_random, class_random)
+    out = model(x_random, timestep_random, c_full_random)
     print('out size', out.size())
-    out2 = model.forward_with_cfg(x_random, timestep_random, class_random, 7.5)
+    out2 = model.forward_with_cfg(x_random, timestep_random, c_full_random, 7.5)
     print('out2 size', out2.size())
-    # out_flat = out.permute(0, 2, 3, 1).reshape(-1, out.size(1))
+
     # out_flat = gumbel_sample(out_flat, temperature=1.0)
     # print('out_flat size', out_flat.size())
     # out_flat = out_flat.view(out.size(0), *out.shape[2:])
