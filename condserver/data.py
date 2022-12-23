@@ -102,10 +102,42 @@ def preprocess(image):
 
 
 def collate_oldbookillustrations_2(batch):
-    images = torch.cat([preprocess(crop_random(resize_image(i['1600px']))) for i in batch], 0)
-    captions = [i['image_alt'] if i.get('image_alt', None) is not None else
-        i.get('image_caption', '') for i in batch]
-    return [images, captions]
+    captions = []
+    for i in batch:
+        caption_1 = i.get('image_alt', None)
+        caption_2 = i.get('image_caption', None)
+        cs = list(filter(lambda x: x is not None, [caption_1, caption_2]))
+        captions.append(choice(cs))
+
+    captions_flat_tensor = None
+    captions_full_tensor = None
+    uncaptions_flat_tensor = None
+    uncaptions_full_tensor = None
+    try:
+        captions_json_resp = requests.post(URL_CONDITIONING,
+            json={'captions': captions},
+            timeout=60)
+        assert captions_json_resp.status_code == 200
+        captions_json = captions_json_resp.json()
+        captions_flat_tensor = b64_string_to_tensor(captions_json['flat'])
+        captions_full_tensor = b64_string_to_tensor(captions_json['full'])
+        uncaptions_flat_tensor = b64_string_to_tensor(captions_json['flat_uncond'])
+        uncaptions_full_tensor = b64_string_to_tensor(captions_json['full_uncond'])
+    except Exception as e:
+        print('failed to get caption tensors', e)
+        import traceback
+        traceback.print_exc()
+        pass
+    
+    images = torch.cat([preprocess(crop_random(resize_image(i['1600px'])))
+        for i in batch], 0)
+    return images, {
+        'captions': captions,
+        'flat': captions_flat_tensor,
+        'full': captions_full_tensor,
+        'flat_uncond': uncaptions_flat_tensor,
+        'full_uncond': uncaptions_full_tensor,
+    }
 
 
 def collate_laion_coco(
