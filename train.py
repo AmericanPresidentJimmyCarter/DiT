@@ -9,7 +9,7 @@ import torchvision
 from tqdm import tqdm
 import time
 import numpy as np
-from models2 import DiT_S_2_CA # DiT_XL_2_CA
+from models2 import DiT_XL_2_CA # DiT_XL_2_CA
 import requests
 
 from ema import ModelEma
@@ -35,7 +35,7 @@ def b64_string_to_tensor(s: str, device) -> torch.Tensor:
 
 
 def decode_latents(vae, latents):
-    print('latents', latents.size())
+    # print('latents', latents.size())
     image = None
     with torch.no_grad():
         image = vae.decode(latents / 0.18215).sample
@@ -54,11 +54,11 @@ def sample(model, vae, diff_module, conds, unconds, sz, _device):
     interleaved = torch.empty((conds.size()[0] * 2, conds.size()[1],
         conds.size()[2])).to(_device)
     for i in range(conds.size()[0] * 2):
-        if i % 2 == 0:
-            interleaved[i] = conds[i // 2]
+        if i < conds.size()[0]:
+            interleaved[i] = conds[i]
         else:
             interleaved[i] = unconds[i // 2]
-    model_kwargs = dict(conditioning=interleaved, cfg_scale=4.)
+    model_kwargs = dict(conditioning=interleaved, cfg_scale=7.5)
 
     # Sample images:
     samples = diff_module.p_sample_loop(
@@ -95,7 +95,7 @@ def train(args):
     # wait for everyone to load vae
     accelerator.wait_for_everyone()
 
-    model = DiT_S_2_CA(input_size=args.image_size // 8).to(device)
+    model = DiT_XL_2_CA(input_size=args.image_size // 8).to(device)
     # wait for everyone to load model
     accelerator.wait_for_everyone()
 
@@ -217,13 +217,16 @@ def train(args):
         # ):  # 10% of the times -> unconditional training for classifier-free-guidance
         #     text_full_for_step = text_embeddings_full_uncond
         total_loss = 0
-        for nts in range(args.timesteps):
+        for nts in range(args.loop_training_steps):
+            text_embeddings_local = text_embeddings_full
+            if np.random.rand() < 0.1:
+                text_embeddings_local = text_embeddings_full_uncond
             pred = diff_module.training_losses(
                 getattr(maybe_unwrap_model(model), 'forward'),
                 image_latents,
                 torch.randint(0, args.timesteps, (image_latents.size()[0],),
                     device=device),
-                model_kwargs={ 'conditioning': text_embeddings_full })
+                model_kwargs={ 'conditioning': text_embeddings_local })
             loss = torch.mean(pred['loss'])
             # print(loss, pred)
 
@@ -281,8 +284,8 @@ def train(args):
                 samples = sample(maybe_unwrap_model(model), vae, diff_module,
                     text_embeddings_full, text_embeddings_full_uncond,
                     args.image_size, device)
-                print('samples')
-                    
+                # print('samples')
+
                 # recon_images = vae.decode(samples / 0.18215).sample
                 # print('samples', samples.size())
                 recon_images = decode_latents(vae, image_latents)
@@ -422,11 +425,11 @@ if __name__ == "__main__":
     args.dataset_type = "webdataset"
     args.total_steps = 2_000_000
     # Be sure to sync with TARGET_SIZE in utils.py and condserver/data.py
-    args.batch_size = 8 # 112
+    args.batch_size = 9 # 112
     args.image_size = 256
-    args.log_period = 75
+    args.log_period = 300
     args.extra_ckpt = 10_000
-    args.write_every_step = 25
+    args.write_every_step = 100
     args.ema = False
     args.ema_decay = 0.9999
     args.ema_update_steps = 50_000
@@ -435,30 +438,31 @@ if __name__ == "__main__":
     args.num_codebook_vectors = 8192
     args.log_captions = True
     args.finetune = False
-    args.comparison_samples = 2 # 12
+    args.comparison_samples = 8 # 12
     args.cool_captions_text = [
         "a cat is sleeping",
         "a painting of a clown",
-        # "a horse",
-        # "a river bank at sunset",
-        # "bon jovi playing a sold out show in egypt. you can see the great pyramids in the background",
-        # "The citizens of Rome rebel against the patricians, believing them to be hoarding all of the food and leaving the rest of the city to starve",
-        # "King Henry rouses his small, weak, and ill troops, telling them that the less men there are, the more honour they will all receive.",
-        # "Upon its outward marges under the westward mountains Mordor was a dying land, but it was not yet dead. And here things still grew, harsh, twisted, bitter, struggling for life.",
+        "a horse",
+        "a river bank at sunset",
+        "bon jovi playing a sold out show in egypt. you can see the great pyramids in the background",
+        "The citizens of Rome rebel against the patricians, believing them to be hoarding all of the food and leaving the rest of the city to starve",
+        "King Henry rouses his small, weak, and ill troops, telling them that the less men there are, the more honour they will all receive.",
+        "Upon its outward marges under the westward mountains Mordor was a dying land, but it was not yet dead. And here things still grew, harsh, twisted, bitter, struggling for life.",
         # "the power rangers high five a dolphin",
         # "joe biden is surfing a giant wave while holding an ice cream cone",
     ]
     parallel_init_dir = "/data"
     args.parallel_init_file = f"file://{parallel_init_dir}/dist_file"
-    args.wandb_project = "ditc-test"
+    args.wandb_project = "ditc"
     args.wandb_entity = "mbabbins"
     # args.cache_dir = "/data/cache"  # cache_dir for models
-    # args.cache_dir = "/fsx/hlky/.cache"
-    args.cache_dir = "/home/user/.cache"
+    args.cache_dir = "/fsx/hlky/.cache"
+    # args.cache_dir = "/home/user/.cache"
     args.offload = False
     args.n_nodes = 1
-    args.devices = [0,1,2,3,4,5,6,7]
+    args.devices = [0,1,2,3,4,5,6]
     args.timesteps = 250
+    args.loop_training_steps = 25
 
     # Testing:
     # args.dataset_path = '/home/user/Programs/Paella/models/6.tar'

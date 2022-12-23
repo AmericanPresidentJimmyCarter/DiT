@@ -198,6 +198,7 @@ class DiT(nn.Module):
         model_channels=320,
         transformer_depth=1,
         context_dim=2048,
+        skip_decay_factor=2.,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -205,6 +206,7 @@ class DiT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
+        self.skip_decay_factor = skip_decay_factor
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -217,7 +219,7 @@ class DiT(nn.Module):
         self.blocks.extend(nn.ModuleList([
             DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
         ]))
-        
+
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
 
@@ -288,11 +290,14 @@ class DiT(nn.Module):
         t = self.t_embedder(t)                   # (N, D)
         # y = self.y_embedder(y, self.training)    # (N, D)
         c = t                                # (N, D)
-        for block in self.blocks:
+        x_0 = None
+        for block_idx, block in enumerate(self.blocks):
             if isinstance(block, Attention2D):
                 x = block(x, conditioning)
+                x_0 = x
             if isinstance(block, DiTBlock):
                 x = block(x, c)                      # (N, T, D)
+                x = torch.lerp(x, x_0, 1. / self.skip_decay_factor**block_idx) # Decaying skip connection to the first output
         x = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         return x

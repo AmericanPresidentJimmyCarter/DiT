@@ -28,8 +28,8 @@ class BatchResponse(BaseModel):
 
 
 class Arguments:
-    small_batch_size = 8
-    batch_size = 8
+    small_batch_size = 9
+    batch_size = 9
     num_workers = 8
 
     # small_batch_size = 2

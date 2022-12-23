@@ -23,7 +23,7 @@ TARGET_SIZE = 256
 URL_BATCH = 'http://127.0.0.1:4456/batch'
 URL_CONDITIONING = 'http://127.0.0.1:4455/conditionings'
 
-seed(12345)
+seed(1)
 
 
 def b64_string_to_tensor(s: str) -> torch.Tensor:
