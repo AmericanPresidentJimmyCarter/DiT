@@ -9,7 +9,7 @@ import torchvision
 from tqdm import tqdm
 import time
 import numpy as np
-from models2 import DiT_XL_2_CA # DiT_XL_2_CA
+from models4 import DiT_XXL_2_CA # DiT_XL_2_CA
 import requests
 
 from ema import ModelEma
@@ -95,7 +95,7 @@ def train(args):
     # wait for everyone to load vae
     accelerator.wait_for_everyone()
 
-    model = DiT_XL_2_CA(input_size=args.image_size // 8).to(device)
+    model = DiT_XXL_2_CA(input_size=args.image_size // 8).to(device)
     # wait for everyone to load model
     accelerator.wait_for_everyone()
 
