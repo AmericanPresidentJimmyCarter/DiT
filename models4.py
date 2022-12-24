@@ -3,13 +3,13 @@
 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
+from collections import deque
 import torch
 import torch.nn as nn
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
-from einops import rearrange
+import torch.nn.functional as F
 
 
 def modulate(x, shift, scale):
@@ -20,58 +20,25 @@ def modulate(x, shift, scale):
 #               Embedding Layers for Timesteps and Conditioning                 #
 #################################################################################
 
-class Attention2D(nn.Module):
-    def __init__(self, x_sz, c_sz, nhead=16):
-        super().__init__()
 
-        self.proj_in = nn.Conv2d(
-            x_sz,
-            c_sz,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-        )
-
-        self.proj_out = nn.Conv2d(
-            c_sz,
-            x_sz,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-        )
-
-        self.ln = nn.LayerNorm(x_sz)
-        self.ln_out = nn.LayerNorm(x_sz)
-        self.attn = torch.nn.MultiheadAttention(c_sz, nhead, bias=True, batch_first=True)
-
-    def forward(self, x, c):
-        norm_x = self.ln(x)
-        norm_x = norm_x.unsqueeze(0)
-        norm_x = rearrange(norm_x, 'a b c d -> a d c b')
-        # print('norm_x', norm_x.size())
-        shaped_x = self.proj_in(norm_x)
-        shaped_x = shaped_x.squeeze(0)
-        shaped_x = rearrange(shaped_x, 'a b c -> c b a')
-        x_out = self.attn(c, shaped_x, shaped_x, need_weights=False)[0]
-        x_out = rearrange(shaped_x, 'c b a -> a b c')
-        x_out = x_out.unsqueeze(0)
-        reshaped_x = self.proj_out(x_out)
-        reshaped_x = rearrange(reshaped_x, 'a d c b -> a b c d')
-        reshaped_x = reshaped_x.squeeze(0)
-        renorm_x = self.ln_out(reshaped_x)
-        return renorm_x
+def weighted_mean(tens: torch.Tensor, weights: list[float], dim: int) -> torch.Tensor:
+    split_num = len(weights)
+    chunks = tens.split(tens.size()[dim] // split_num, dim=dim)
+    weighted_means = [torch.mean(chunks[i], dim=1) * w for
+        i, w in enumerate(weights)]
+    return torch.stack(weighted_means, dim=0).sum(dim=0) / split_num
 
 
-class TimestepEmbedder(nn.Module):
+class ConditionedTimestepEmbedder(nn.Module):
     """
-    Embeds scalar timesteps into vector representations.
+    Embeds scalar timestep and conditioning into vector representations.
     """
-    def __init__(self, hidden_size, frequency_embedding_size=256):
+    def __init__(self, hidden_size: int, c_size: int, frequency_embedding_size: int=256):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
-            nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size, bias=True),
+            # nn.Linear(frequency_embedding_size + c_size, hidden_size, bias=True),
+            nn.Mish(),
+            nn.Linear(frequency_embedding_size + c_size, frequency_embedding_size + c_size, bias=True),
         )
         self.frequency_embedding_size = frequency_embedding_size
 
@@ -95,9 +62,10 @@ class TimestepEmbedder(nn.Module):
             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         return embedding
 
-    def forward(self, t):
+    def forward(self, t, c):
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
-        t_emb = self.mlp(t_freq)
+        t_tens = torch.cat([t_freq, c], dim=1)
+        t_emb = self.mlp(t_tens)
         return t_emb
 
 
@@ -139,17 +107,18 @@ class DiTBlock(nn.Module):
     """
     A DiT block with gated adaptive layer norm (adaLN) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+    def __init__(self, hidden_size, num_heads, cond_embed_size, mlp_ratio=4.0, frequency_embedding_size: int=256, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim,
+            act_layer=approx_gelu, drop=0)
         self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+            nn.Mish(),
+            nn.Linear(frequency_embedding_size + cond_embed_size, 6 * hidden_size, bias=True)
         )
 
     def forward(self, x, c):
@@ -163,13 +132,13 @@ class FinalLayer(nn.Module):
     """
     The final layer of DiT.
     """
-    def __init__(self, hidden_size, patch_size, out_channels):
+    def __init__(self, hidden_size, patch_size, out_channels, cond_size, frequency_embedding_size: int=256,):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
         self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+            nn.Mish(),
+            nn.Linear(cond_size + frequency_embedding_size, 2 * hidden_size, bias=True)
         )
 
     def forward(self, x, c):
@@ -192,11 +161,7 @@ class DiT(nn.Module):
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
-        class_dropout_prob=0.1,
-        num_classes=1000,
         learn_sigma=True,
-        model_channels=320,
-        transformer_depth=1,
         context_dim=2048,
         skip_decay_factor=2.,
     ):
@@ -209,18 +174,21 @@ class DiT(nn.Module):
         self.skip_decay_factor = skip_decay_factor
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
-        self.t_embedder = TimestepEmbedder(hidden_size)
+        self.t_embedder = ConditionedTimestepEmbedder(hidden_size, context_dim)
         # self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, num_patches, hidden_size),
+            requires_grad=False)
 
-        self.blocks = nn.ModuleList([Attention2D(hidden_size, context_dim, num_heads)])
-        self.blocks.extend(nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
-        ]))
+        self.blocks = nn.ModuleList([
+            DiTBlock(hidden_size, num_heads, context_dim, mlp_ratio=mlp_ratio)
+            for _ in range(depth)
+        ])
 
-        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
+        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels,
+            context_dim)
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -233,19 +201,19 @@ class DiT(nn.Module):
         self.apply(_basic_init)
 
         # Initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
+        pos_embed = get_2d_sincos_pos_embed(
+            self.pos_embed.shape[-1],
+            int(self.x_embedder.num_patches ** 0.5,
+        ))
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         # Initialize patch_embed like nn.Linear (instead of nn.Conv2d)
         w = self.x_embedder.proj.weight.data
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
-        # Initialize label embedding table:
-        # nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
-
         # Initialize timestep embedding MLP:
-        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        # nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[1].weight, std=0.02)
 
         # Zero-out adaLN modulation layers in DiT blocks:
         for block in self.blocks:
@@ -282,24 +250,14 @@ class DiT(nn.Module):
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
         """
-        # print(self.x_embedder(x).size(), self.x_embedder(x).dtype)
-        # print(self.pos_embed.size(), self.pos_embed.dtype)
-        # x = self.blocks[0](x, conditioning)
-
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-        t = self.t_embedder(t)                   # (N, D)
-        # y = self.y_embedder(y, self.training)    # (N, D)
-        c = t                                # (N, D)
-        x_0 = None
-        for block_idx, block in enumerate(self.blocks):
-            if isinstance(block, Attention2D):
-                x = block(x, conditioning)
-                x_0 = x
-            if isinstance(block, DiTBlock):
-                x = block(x, c)                      # (N, T, D)
-                x = torch.lerp(x, x_0, 1. / self.skip_decay_factor**block_idx) # Decaying skip connection to the first output
-        x = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
-        x = self.unpatchify(x)                   # (N, out_channels, H, W)
+
+        cond_squished = torch.mean(conditioning, 1)
+        for block in self.blocks:
+            c = self.t_embedder(t, cond_squished) # (N, D), (N, D) -> (N, D)
+            x = block(x, c)                 # (N, T, D), (N, D) -> (N, T, D)
+        x = self.final_layer(x, c)          # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)              # (N, out_channels, H, W)
         return x
 
     def forward_with_cfg(self, x, t, conditioning, cfg_scale):
@@ -375,8 +333,8 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #                                   DiT Configs                                  #
 #################################################################################
 
-def DiT_XL_2_CA(**kwargs):
-    return DiT(depth=28, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
+def DiT_XXL_2_CA(**kwargs):
+    return DiT(depth=28, hidden_size=1280, patch_size=2, num_heads=16, **kwargs)
 
 def DiT_S_2_CA(**kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=16, **kwargs)
@@ -385,7 +343,7 @@ if __name__ == "__main__":
     NUM_IMAGES = 2
     IMAGE_SIZE = 256
     device = "cuda"
-    model = DiT(input_size=IMAGE_SIZE // 8, depth=28, hidden_size=1152, patch_size=2, num_heads=16) # .to(device)
+    model = DiT(input_size=IMAGE_SIZE // 8, depth=28, hidden_size=1280, patch_size=2, num_heads=16) # .to(device)
     print(f"Number of Parameters: {sum([p.numel() for p in model.parameters()])}")
     x_random = torch.rand(NUM_IMAGES, 4, IMAGE_SIZE // 8, IMAGE_SIZE // 8) # .to(device)
     print('in', x_random.size())

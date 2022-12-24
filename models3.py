@@ -187,7 +187,7 @@ class DiTBlock(nn.Module):
     """
     A DiT block with gated adaptive layer norm (adaLN) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+    def __init__(self, hidden_size, num_heads, cond_embed_size, mlp_ratio=4.0, frequency_embedding_size: int=256, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
@@ -198,7 +198,7 @@ class DiTBlock(nn.Module):
             act_layer=approx_gelu, drop=0)
         self.adaLN_modulation = nn.Sequential(
             nn.Mish(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+            nn.Linear(frequency_embedding_size + cond_embed_size, 6 * hidden_size, bias=True)
         )
 
     def forward(self, x, c):
@@ -264,7 +264,8 @@ class DiT(nn.Module):
 
         self.dual_text_embed_cross_attn = CrossAttention2D(context_dim, num_heads)
         self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
+            DiTBlock(hidden_size, num_heads, context_dim // 2, mlp_ratio=mlp_ratio)
+            for _ in range(depth)
         ])
 
         # Set up the attention emphasis scheduler for each block, so that we
@@ -343,15 +344,16 @@ class DiT(nn.Module):
         c_attended = self.dual_text_embed_cross_attn(conditioning)
 
         for block_idx, block in enumerate(self.blocks):
+            # (N, T, D) -> (N, D)
             c_block = weighted_mean(
                 c_attended,
                 self.block_conditioning_mean_schedule[block_idx],
                 1, # Squish the token layer
             )
-            c = self.t_embedder(t, c_block) # (N, D)
-            x = block(x, c_block)                      # (N, T, D)
-        x = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
-        x = self.unpatchify(x)                   # (N, out_channels, H, W)
+            c = self.t_embedder(t, c_block) # (N, D), (N, D) -> (N, D)
+            x = block(x, c)                 # (N, T, D), (N, D) -> (N, T, D)
+        x = self.final_layer(x, c)          # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)              # (N, out_channels, H, W)
         return x
 
     def forward_with_cfg(self, x, t, conditioning, cfg_scale):
@@ -409,7 +411,7 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     out: (M, D)
     """
     assert embed_dim % 2 == 0
-    omega = np.arange(embed_dim // 2, dtype=np.float)
+    omega = np.arange(embed_dim // 2, dtype=np.float32)
     omega /= embed_dim / 2.
     omega = 1. / 10000**omega  # (D/2,)
 
@@ -437,7 +439,7 @@ if __name__ == "__main__":
     NUM_IMAGES = 2
     IMAGE_SIZE = 256
     device = "cuda"
-    model = DiT(input_size=IMAGE_SIZE // 8, depth=28, hidden_size=1024, patch_size=2, num_heads=16) # .to(device)
+    model = DiT(input_size=IMAGE_SIZE // 8, depth=32, hidden_size=1280, patch_size=2, num_heads=16) # .to(device)
     print(f"Number of Parameters: {sum([p.numel() for p in model.parameters()])}")
     x_random = torch.rand(NUM_IMAGES, 4, IMAGE_SIZE // 8, IMAGE_SIZE // 8) # .to(device)
     print('in', x_random.size())
