@@ -106,8 +106,22 @@ def collate_oldbookillustrations_2(batch):
     for i in batch:
         caption_1 = i.get('image_alt', None)
         caption_2 = i.get('image_caption', None)
-        cs = list(filter(lambda x: x is not None, [caption_1, caption_2]))
-        captions.append(choice(cs))
+        caption_3 = i.get('image_title', None)
+        caption_4 = i.get('image_description', None)
+        cs = choice(list(filter(lambda x: x is not None, [
+            caption_1, 
+            caption_2,
+            caption_3,
+            caption_4,
+        ])))
+        subject = i.get('illustration_subject', None)
+        if subject is not None:
+            cs = f'{subject}. {cs}'
+        tags = i.get('tags', None)
+        if tags is not None:
+            tag_s = ', '.join(tags)
+            cs = f'{cs}. {tag_s}'
+        captions.append(cs)
 
     captions_flat_tensor = None
     captions_full_tensor = None
