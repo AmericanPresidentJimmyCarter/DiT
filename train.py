@@ -231,8 +231,8 @@ def train(args):
             # print(loss, pred)
 
             accelerator.backward(loss, retain_graph=nts != args.timesteps - 1)
+            grad_norm = accelerator.clip_grad_norm_(model.parameters(), args.max_norm).item()
             total_loss += loss.detach().cpu().numpy()
-            # grad_norm = accelerator.clip_grad_norm_(model.parameters(), args.max_norm).item()
 
             optimizer.step()
             scheduler.step()
@@ -249,6 +249,7 @@ def train(args):
                 # "acc": total_acc / (step + 1),
                 "curr_loss": loss.item(),
                 # "curr_acc": acc.item(),
+                "grad_norm": grad_norm,
                 "ppx": np.exp(total_loss / (step + 1)),
                 "lr": optimizer.param_groups[0]["lr"],
             }
@@ -444,12 +445,12 @@ if __name__ == "__main__":
         "a painting of a clown",
         "a horse",
         "a river bank at sunset",
-        "bon jovi playing a sold out show in egypt. you can see the great pyramids in the background",
-        "The citizens of Rome rebel against the patricians, believing them to be hoarding all of the food and leaving the rest of the city to starve",
-        "King Henry rouses his small, weak, and ill troops, telling them that the less men there are, the more honour they will all receive.",
-        "Upon its outward marges under the westward mountains Mordor was a dying land, but it was not yet dead. And here things still grew, harsh, twisted, bitter, struggling for life.",
-        # "the power rangers high five a dolphin",
-        # "joe biden is surfing a giant wave while holding an ice cream cone",
+        "egypt",
+        "a jester in a courtroom",
+        "a frog",
+        "a room with a dog in it",
+        "a cat on a rooftop",
+        "a gentleman and a lady standing together",
     ]
     parallel_init_dir = "/data"
     args.parallel_init_file = f"file://{parallel_init_dir}/dist_file"
@@ -463,6 +464,7 @@ if __name__ == "__main__":
     args.devices = [0,1,2,3,4,5,6]
     args.timesteps = 250
     args.loop_training_steps = 25
+    args.max_norm = 5.
 
     # Testing:
     # args.dataset_path = '/home/user/Programs/Paella/models/6.tar'
