@@ -373,11 +373,14 @@ def filter_laion_a_dataset(item,
 def get_dataloader(args):
     # for gigant/oldbookillustrations_2
     #
-    # import datasets
-    # dataset = datasets.load_dataset(args.dataset_path, split="train")
-    # dataloader = DataLoader(dataset, batch_size=args.batch_size,
-    #     num_workers=args.num_workers,
-    #     collate_fn=collate_oldbookillustrations_2)
+    import datasets
+    dataset = datasets.load_dataset(args.dataset_path, split="train") \
+        .shuffle(seed=randint(0, 2**32-1))
+    dataloader = DataLoader(dataset,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        prefetch_factor=16, # Work way ahead of time
+        collate_fn=collate_oldbookillustrations_2)
 
     # For laion-coco
     # import datasets
@@ -391,22 +394,22 @@ def get_dataloader(args):
     #     collate_fn=collate_laion_coco)
 
     # for laion/laion-a
-    dataset = webdataset.WebDataset(
-        args.dataset_path,
-        resampled=True,
-        handler=warn_and_continue,
-    ) \
-        .map(
-            ProcessDataLaionA(),
-            handler=warn_and_continue,
-        )
+    # dataset = webdataset.WebDataset(
+    #     args.dataset_path,
+    #     resampled=True,
+    #     handler=warn_and_continue,
+    # ) \
+    #     .map(
+    #         ProcessDataLaionA(),
+    #         handler=warn_and_continue,
+    #     )
 
-    dataloader = DataLoader(
-        dataset.batched(args.batch_size),
-        batch_size=None,
-        num_workers=args.num_workers,
-        collate_fn=collate_laion_a,
-    )
+    # dataloader = DataLoader(
+    #     dataset.batched(args.batch_size),
+    #     batch_size=None,
+    #     num_workers=args.num_workers,
+    #     collate_fn=collate_laion_a,
+    # )
 
     return dataloader
 
@@ -415,7 +418,7 @@ def get_dataloader_laion_coco(args):
     import datasets
 
     dataset = datasets \
-        .load_dataset(args.dataset_path, split="train", streaming=True) \
+        .load_dataset(args.dataset_path, split="train", streaming=True, cache_dir=args.cache_dir) \
         .shuffle(seed=randint(0, 2**32-1)) \
         .filter(filter_laion_coco_dataset)
 

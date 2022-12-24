@@ -35,7 +35,9 @@ class Arguments:
     # small_batch_size = 2
     # batch_size = 2
     # num_workers = 1
-    dataset_path = "laion/laion-coco"
+    # dataset_path = "laion/laion-coco"
+    dataset_path = 'gigant/oldbookillustrations_2'
+    cache_dir = '/scratch/hfcache'
     # cache_dir = "/home/user/.cache"  # cache_dir for models
 
 
