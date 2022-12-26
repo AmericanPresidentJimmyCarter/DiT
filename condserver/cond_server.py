@@ -9,11 +9,13 @@ import argparse
 import sys
 
 import torch
+
 from pydantic import BaseModel
 
 import open_clip
 from open_clip import tokenizer
 from t5 import FrozenT5Embedder
+from unclip_prior import UnCLIPPriorPipeline
 
 from data import tensor_to_b64_string
 
@@ -34,6 +36,7 @@ class ConditioningResponse(BaseModel):
     full: str
     flat_uncond: str
     full_uncond: str
+    prior_flat: str
 
 
 def spawn_clip_model():
@@ -53,8 +56,15 @@ def spawn_t5_model():
     return _t5_model
 
 
+def spawn_prior_model():
+    pl = UnCLIPPriorPipeline.from_pretrained("kakaobrain/karlo-v1-alpha",
+        torch_dtype=torch.float32, device=CONDITIONING_DEVICE)
+    return pl
+
+
 clip_model = spawn_clip_model()
 t5_model = spawn_t5_model()
+prior_model = spawn_prior_model()
 
 app = FastAPI()
 
@@ -124,10 +134,12 @@ def conditionings(req: ConditioningRequest) -> Response:
     try:
         flat = None
         full = None
+        prior_flat = None
         with torch.no_grad():
             flat, full, flat_uncond, full_uncond = \
                 captions_to_conditioning_tensors(clip_model, t5_model,
                     req.captions)
+            prior_flat = prior_model(req.captions)
         # resp = ConditioningResponse(
         #     flat=tensor_to_b64_string(flat),
         #     full=tensor_to_b64_string(full),
@@ -139,6 +151,7 @@ def conditionings(req: ConditioningRequest) -> Response:
             'full': tensor_to_b64_string(full),
             'flat_uncond': tensor_to_b64_string(flat_uncond),
             'full_uncond': tensor_to_b64_string(full_uncond),
+            'prior_flat': tensor_to_b64_string(prior_flat),
         }
         return Response(content=ujson.dumps(resp), media_type="application/json")
     except Exception as e:
