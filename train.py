@@ -9,7 +9,7 @@ import torchvision
 from tqdm import tqdm
 import time
 import numpy as np
-from models4 import DiT_XXL_2_CA # DiT_XL_2_CA
+from models5 import DiT_XXL_2_CA # DiT_XL_2_CA
 import requests
 
 from ema import ModelEma
@@ -46,7 +46,7 @@ def decode_latents(vae, latents):
     return image
 
 
-def sample(model, vae, diff_module, conds, unconds, sz, _device):
+def sample(model, vae, diff_module, conds, unconds, prior_flat, prior_flat_uncond, sz, _device):
     z = torch.randn(conds.size()[0], 4, sz // 8, sz // 8, device=_device)
     z = torch.cat([z, z], 0)
     # print('conds', conds.size())
@@ -58,11 +58,29 @@ def sample(model, vae, diff_module, conds, unconds, sz, _device):
             interleaved[i] = conds[i]
         else:
             interleaved[i] = unconds[i // 2]
-    model_kwargs = dict(conditioning=interleaved, cfg_scale=7.5)
+
+    interleaved_priors = torch.empty((prior_flat.size()[0] * 2, prior_flat.size()[1])).to(_device)
+    for i in range(prior_flat.size()[0] * 2):
+        if i < conds.size()[0]:
+            interleaved_priors[i] = prior_flat[i]
+        else:
+            interleaved_priors[i] = prior_flat_uncond[i // 2]
+
+    model_kwargs = dict(
+        conditioning=interleaved,
+        conditioning_prior=interleaved_priors,
+        cfg_scale=7.5,
+    )
 
     # Sample images:
     samples = diff_module.p_sample_loop(
-        model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=True, device=_device
+        model.forward_with_cfg,
+        z.shape,
+        z,
+        clip_denoised=False,
+        model_kwargs=model_kwargs,
+        progress=True,
+        device=_device,
     )
     samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
 
@@ -187,7 +205,9 @@ def train(args):
             'conditioning_flat' not in resp_dict or resp_dict['conditioning_flat'] is None or \
             'conditioning_full' not in resp_dict or resp_dict['conditioning_full'] is None or \
             'unconditioning_flat' not in resp_dict or resp_dict['unconditioning_flat'] is None or \
-            'unconditioning_full' not in resp_dict or resp_dict['unconditioning_full'] is None:
+            'unconditioning_full' not in resp_dict or resp_dict['unconditioning_full'] is None or \
+            'prior_flat' not in resp_dict or resp_dict['prior_flat'] is None or \
+            'prior_flat_uncond' not in resp_dict or resp_dict['prior_flat_uncond'] is None:
             continue
 
         images = b64_string_to_tensor(resp_dict['images'], 'cpu')
@@ -210,6 +230,23 @@ def train(args):
         text_embeddings_full_uncond = text_embeddings_full_uncond.tile((2,1,1))[0:args.batch_size].to(device)
 
         if text_embeddings_full is None or text_embeddings_full_uncond is None:
+            continue
+
+        prior_flat = b64_string_to_tensor(resp_dict['prior_flat'], 'cpu')
+        if prior_flat is None:
+            continue
+        prior_flat = prior_flat.tile((2,1,1))[0:args.batch_size].to(device)
+
+        if prior_flat is None or prior_flat is None:
+            continue
+
+        prior_flat_uncond = b64_string_to_tensor(resp_dict['prior_flat_uncond'],
+            'cpu')
+        if prior_flat_uncond is None:
+            continue
+        prior_flat_uncond = prior_flat_uncond.tile((2,1,1))[0:args.batch_size].to(device)
+
+        if prior_flat_uncond is None or prior_flat_uncond is None:
             continue
 
         image_latents = vae.encode(images).latent_dist.sample() *  0.18215
@@ -287,6 +324,7 @@ def train(args):
                 text_embeddings_full = text_embeddings_full[: args.comparison_samples]
                 samples = sample(maybe_unwrap_model(model), vae, diff_module,
                     text_embeddings_full, text_embeddings_full_uncond,
+                    prior_flat, prior_flat_uncond,
                     args.image_size, device)
                 # print('samples')
 
@@ -312,6 +350,10 @@ def train(args):
 
                     cool_captions_embeddings_full = b64_string_to_tensor(resp_dict['full'],
                         device)
+                    cool_prior_flat = b64_string_to_tensor(resp_dict['prior_flat'],
+                        device)
+                    cool_prior_flat_uncond = b64_string_to_tensor(resp_dict['cool_prior_flat_uncond'],
+                        device)
 
                     # cool_captions_embeddings = generate_clip_embeddings(clip_model,
                     #     text_tokens)
@@ -328,6 +370,7 @@ def train(args):
                         caption_embedding = caption_embedding[0].float().to(device)
                         images_cool = sample(maybe_unwrap_model(model), vae,
                             diff_module, caption_embedding, text_embeddings_full_uncond,
+                            cool_prior_flat, cool_prior_flat_uncond,
                             args.image_size, device)
 
                         for s in images_cool:

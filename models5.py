@@ -21,26 +21,37 @@ def modulate(x, shift, scale):
 #################################################################################
 
 
-def weighted_mean(tens: torch.Tensor, weights: list[float], dim: int) -> torch.Tensor:
-    split_num = len(weights)
-    chunks = tens.split(tens.size()[dim] // split_num, dim=dim)
-    weighted_means = [torch.mean(chunks[i], dim=1) * w for
-        i, w in enumerate(weights)]
-    return torch.stack(weighted_means, dim=0).sum(dim=0) / split_num
+# def weighted_mean(tens: torch.Tensor, weights: list[float], dim: int) -> torch.Tensor:
+#     split_num = len(weights)
+#     chunks = tens.split(tens.size()[dim] // split_num, dim=dim)
+#     weighted_means = [torch.mean(chunks[i], dim=1) * w for
+#         i, w in enumerate(weights)]
+#     return torch.stack(weighted_means, dim=0).sum(dim=0) / split_num
 
 
 class ConditionedTimestepEmbedder(nn.Module):
     """
     Embeds scalar timestep and conditioning into vector representations.
     """
-    def __init__(self, hidden_size: int, c_size: int, frequency_embedding_size: int=256):
+    def __init__(
+        self,
+        hidden_size: int,
+        c_size: int,
+        c_prior_size: int=768,
+        frequency_embedding_size: int=256,
+    ):
         super().__init__()
         self.mlp = nn.Sequential(
             # nn.Linear(frequency_embedding_size + c_size, hidden_size, bias=True),
             nn.Mish(),
-            nn.Linear(frequency_embedding_size + c_size, frequency_embedding_size + c_size, bias=True),
+            nn.Linear(
+                frequency_embedding_size + c_size + c_prior_size,
+                frequency_embedding_size + c_size + c_prior_size,
+                bias=True),
         )
         self.frequency_embedding_size = frequency_embedding_size
+        self.c_size = c_size
+        self.c_prior_size = c_prior_size
 
     @staticmethod
     def timestep_embedding(t, dim, max_period=10000):
@@ -62,11 +73,26 @@ class ConditionedTimestepEmbedder(nn.Module):
             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         return embedding
 
-    def forward(self, t, c):
+    def forward(self, t, c, c_prior):
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
-        t_tens = torch.cat([t_freq, c], dim=1)
-        t_emb = self.mlp(t_tens)
-        return t_emb
+
+        t_accumulator = torch.zeros((c.size()[0],
+            self.frequency_embedding_size + self.c_size + self.c_prior_size))
+
+        # Activations across all 77 token layers, then meaned.
+        for i in range(c.size()[1]):
+            c_slice = c[:, i, :]
+            c_slice_w_prior = torch.cat([c_slice, c_prior], dim=1)
+            t_tens = torch.cat([t_freq, c_slice_w_prior], dim=1)
+            t_out = self.mlp(t_tens)
+            t_accumulator.add_(t_out)
+            del c_slice, c_slice_w_prior, t_tens, t_out
+        t_accumulator.div_(c.size()[1])
+
+        assert t_accumulator.size() == (c.size()[0],
+            self.frequency_embedding_size + self.c_size + self.c_prior_size)
+        
+        return t_accumulator
 
 
 class LabelEmbedder(nn.Module):
@@ -107,7 +133,16 @@ class DiTBlock(nn.Module):
     """
     A DiT block with gated adaptive layer norm (adaLN) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, cond_embed_size, mlp_ratio=4.0, frequency_embedding_size: int=256, **block_kwargs):
+    def __init__(
+        self,
+        hidden_size,
+        num_heads,
+        cond_embed_size,
+        mlp_ratio=4.0,
+        frequency_embedding_size: int=256,
+        c_prior_size: int=768,
+        **block_kwargs,
+    ):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
@@ -118,13 +153,14 @@ class DiTBlock(nn.Module):
             act_layer=approx_gelu, drop=0)
         self.adaLN_modulation = nn.Sequential(
             nn.Mish(),
-            nn.Linear(frequency_embedding_size + cond_embed_size, 6 * hidden_size, bias=True)
+            nn.Linear(
+                frequency_embedding_size + cond_embed_size + c_prior_size,
+                6 * hidden_size,
+                bias=True,
+            )
         )
 
     def forward(self, x, c):
-        c_accumulator = torch.zeros((c.size()[0], c.size()[2]))
-        for _ in c.size()[2]:
-            
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
@@ -135,13 +171,25 @@ class FinalLayer(nn.Module):
     """
     The final layer of DiT.
     """
-    def __init__(self, hidden_size, patch_size, out_channels, cond_size, frequency_embedding_size: int=256,):
+    def __init__(
+        self,
+        hidden_size,
+        patch_size,
+        out_channels,
+        cond_size,
+        frequency_embedding_size: int=256,
+        c_prior_size: int=768,
+    ):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
         self.adaLN_modulation = nn.Sequential(
             nn.Mish(),
-            nn.Linear(cond_size + frequency_embedding_size, 2 * hidden_size, bias=True)
+            nn.Linear(
+                frequency_embedding_size + cond_size + c_prior_size,
+                2 * hidden_size,
+                bias=True,
+            )
         )
 
     def forward(self, x, c):
@@ -166,6 +214,7 @@ class DiT(nn.Module):
         mlp_ratio=4.0,
         learn_sigma=True,
         context_dim=2048,
+        context_prior_dim=768,
         skip_decay_factor=2.,
     ):
         super().__init__()
@@ -176,8 +225,10 @@ class DiT(nn.Module):
         self.num_heads = num_heads
         self.skip_decay_factor = skip_decay_factor
 
-        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
-        self.t_embedder = ConditionedTimestepEmbedder(hidden_size, context_dim)
+        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels,
+            hidden_size, bias=True)
+        self.t_embedder = ConditionedTimestepEmbedder(hidden_size, context_dim,
+            context_prior_dim)
         # self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
@@ -186,12 +237,13 @@ class DiT(nn.Module):
             requires_grad=False)
 
         self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, context_dim, mlp_ratio=mlp_ratio)
+            DiTBlock(hidden_size, num_heads, context_dim,
+                c_prior_size=context_prior_dim, mlp_ratio=mlp_ratio)
             for _ in range(depth)
         ])
 
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels,
-            context_dim)
+            context_dim, c_prior_size=context_prior_dim)
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -246,7 +298,7 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, conditioning):
+    def forward(self, x, t, conditioning, conditioning_prior):
         """
         Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -254,23 +306,26 @@ class DiT(nn.Module):
         y: (N,) tensor of class labels
         """
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        c = self.t_embedder(
+            t, # (N, D)
+            conditioning, # (N, T, D)
+            conditioning_prior, # (N, D)
+        ) # -> (N, D)
 
-        cond_squished = torch.mean(conditioning, 1)
         for block in self.blocks:
-            c = self.t_embedder(t, cond_squished) # (N, D), (N, D) -> (N, D)
             x = block(x, c)                 # (N, T, D), (N, D) -> (N, T, D)
         x = self.final_layer(x, c)          # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)              # (N, out_channels, H, W)
         return x
 
-    def forward_with_cfg(self, x, t, conditioning, cfg_scale):
+    def forward_with_cfg(self, x, t, conditioning, conditioning_prior, cfg_scale):
         """
         Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, conditioning)
+        model_out = self.forward(combined, t, conditioning, conditioning_prior)
         eps, rest = model_out[:, :3], model_out[:, 3:]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
@@ -353,11 +408,12 @@ if __name__ == "__main__":
     # c_random = torch.randn((1, 2048)).to(device)
     timestep_random = torch.randint(1, 250, (NUM_IMAGES,)) # .to(device)
     c_full_random = torch.randn((NUM_IMAGES, 77, 2048)) # .to(device)
+    c_prior = torch.randn((NUM_IMAGES, 768)) # .to(device)
     # c_full_random = torch.randn((1, 77, 2048)).to(device)
     # print('x random', x_random.size())
-    out = model(x_random, timestep_random, c_full_random)
+    out = model(x_random, timestep_random, c_full_random, c_prior)
     print('out size', out.size())
-    out2 = model.forward_with_cfg(x_random, timestep_random, c_full_random, 7.5)
+    out2 = model.forward_with_cfg(x_random, timestep_random, c_full_random, c_prior, 7.5)
     print('out2 size', out2.size())
 
     # out_flat = gumbel_sample(out_flat, temperature=1.0)

@@ -1,5 +1,6 @@
 import base64
 import io
+from threading import Lock
 from typing import Dict, List, Union
 import ujson
 from fastapi import FastAPI, HTTPException, Response
@@ -16,6 +17,7 @@ import open_clip
 from open_clip import tokenizer
 from t5 import FrozenT5Embedder
 from unclip_prior import UnCLIPPriorPipeline
+from copy import deepcopy
 
 from data import tensor_to_b64_string
 
@@ -26,6 +28,7 @@ CONDITIONING_DEVICE = 'cuda:7'
 # CACHE_DIR = '/home/user/.cache'
 # CONDITIONING_DEVICE = 'cuda:0'
 
+mtx_prior = Lock()
 
 class ConditioningRequest(BaseModel):
     captions: List[str]
@@ -37,6 +40,7 @@ class ConditioningResponse(BaseModel):
     flat_uncond: str
     full_uncond: str
     prior_flat: str
+    prior_flat_uncond: str
 
 
 def spawn_clip_model():
@@ -58,7 +62,7 @@ def spawn_t5_model():
 
 def spawn_prior_model():
     pl = UnCLIPPriorPipeline.from_pretrained("kakaobrain/karlo-v1-alpha",
-        torch_dtype=torch.float32, device=CONDITIONING_DEVICE)
+        torch_dtype=torch.float32)
     return pl
 
 
@@ -126,20 +130,62 @@ def captions_to_conditioning_tensors(clip_model, t5_model, captions):
     )
 
 
+def captions_to_prior_tensors_thread_safe(prior_model, captions):
+    components = prior_model.components
+
+    components.pop("prior")
+    components.pop("prior_scheduler")
+    # components.pop("text_proj")
+    # components.pop("text_encoder")
+    # components.pop("tokenizer")
+
+    prior = deepcopy(prior_model.prior)
+    scheduler = deepcopy(prior_model.prior_scheduler)
+    # text_proj = deepcopy(prior_model.text_proj)
+    # text_encoder = deepcopy(prior_model.text_encoder)
+    # tokenizer = deepcopy(prior_model.tokenizer)
+
+    _prior_model = UnCLIPPriorPipeline(
+        **components,
+        prior=prior,
+        prior_scheduler=scheduler,
+        # text_encoder,
+        # tokenizer,
+        # text_proj,
+    )
+    prior_flat = _prior_model(captions)
+    prior_flat_uncond = _prior_model([''] * len(captions))
+    return (prior_flat, prior_flat_uncond)
+
+
+def captions_to_prior_tensors(_prior_model, captions):
+    prior_flat = None
+    prior_flat_uncond = None
+    with mtx_prior:
+        prior_flat = _prior_model(captions)
+        prior_flat_uncond = _prior_model([''] * len(captions))
+    return (prior_flat, prior_flat_uncond)
+
+
 @app.post("/conditionings")
 def conditionings(req: ConditioningRequest) -> Response:
     global clip_model
     global t5_model
+    global prior_model
 
     try:
         flat = None
         full = None
+        flat_uncond = None
+        full_uncond = None
         prior_flat = None
+        prior_flat_uncond = None
         with torch.no_grad():
             flat, full, flat_uncond, full_uncond = \
                 captions_to_conditioning_tensors(clip_model, t5_model,
                     req.captions)
-            prior_flat = prior_model(req.captions)
+        prior_flat, prior_flat_uncond = \
+            captions_to_prior_tensors(prior_model, req.captions)
         # resp = ConditioningResponse(
         #     flat=tensor_to_b64_string(flat),
         #     full=tensor_to_b64_string(full),
@@ -152,6 +198,7 @@ def conditionings(req: ConditioningRequest) -> Response:
             'flat_uncond': tensor_to_b64_string(flat_uncond),
             'full_uncond': tensor_to_b64_string(full_uncond),
             'prior_flat': tensor_to_b64_string(prior_flat),
+            'prior_flat_uncond': tensor_to_b64_string(prior_flat_uncond),
         }
         return Response(content=ujson.dumps(resp), media_type="application/json")
     except Exception as e:

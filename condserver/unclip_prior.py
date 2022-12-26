@@ -25,7 +25,7 @@ from transformers import CLIPTextModelWithProjection, CLIPTokenizer
 from diffusers.utils import is_accelerate_available, logging
 from diffusers.pipelines.unclip.text_proj import UnCLIPTextProjModel
 
-DEVICE = 'cuda:0'
+DEVICE = 'cuda:7'
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
@@ -91,6 +91,7 @@ class UnCLIPPriorPipeline(DiffusionPipeline):
             prompt,
             padding="max_length",
             max_length=self.tokenizer.model_max_length,
+            truncation=True,
             return_tensors="pt",
         )
         text_input_ids = text_inputs.input_ids
@@ -173,7 +174,6 @@ class UnCLIPPriorPipeline(DiffusionPipeline):
 
         # TODO: self.prior.post_process_latents is not covered by the offload hooks, so it fails if added to the list
         models = [
-            self.decoder,
             self.text_proj,
             self.text_encoder,
         ]
@@ -204,7 +204,7 @@ class UnCLIPPriorPipeline(DiffusionPipeline):
         self,
         prompt: Union[str, List[str]],
         device: str = DEVICE,
-        generator: Optional[torch.Generator] = torch.Generator(device=DEVICE),
+        generator: Optional[torch.Generator] = None,
         prior_guidance_scale: float = 4.0,
         prior_num_inference_steps: int = 25,
     ):
@@ -221,6 +221,8 @@ class UnCLIPPriorPipeline(DiffusionPipeline):
                 1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt`,
                 usually at the expense of lower image quality.
         """
+        if generator is None:
+            generate = torch.Generator(device=device)
         if isinstance(prompt, str):
             batch_size = 1
         elif isinstance(prompt, list):

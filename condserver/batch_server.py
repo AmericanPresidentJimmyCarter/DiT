@@ -25,12 +25,14 @@ class BatchResponse(BaseModel):
     conditioning_full: str
     unconditioning_flat: str
     unconditioning_full: str
+    prior_flat: str
+    prior_flat_uncond: str
 
 
 class Arguments:
     small_batch_size = 16
     batch_size = 18
-    num_workers = 8
+    num_workers = 4
 
     # small_batch_size = 2
     # batch_size = 2
@@ -66,6 +68,8 @@ def batch(req: BatchRequest) -> Response:
         full_uncond = captions.get('full_uncond')
         # print('full', full_uncond)
         captions = captions.get('captions')
+        prior_flat = captions.get('prior_flat')
+        prior_flat_uncond = captions.get('prior_flat_uncond')
         # resp = BatchResponse(
         #     captions=captions,
         #     images=tensor_to_b64_string(images),
@@ -82,6 +86,8 @@ def batch(req: BatchRequest) -> Response:
             'conditioning_full': tensor_to_b64_string(full),
             'unconditioning_flat': tensor_to_b64_string(flat_uncond),
             'unconditioning_full': tensor_to_b64_string(full_uncond),
+            'prior_flat': tensor_to_b64_string(prior_flat),
+            'prior_flat_uncond': tensor_to_b64_string(prior_flat_uncond),
         }
         # if req.is_main:
         #    resp['captions'] = resp['captions'][0:Arguments().small_batch_size]
