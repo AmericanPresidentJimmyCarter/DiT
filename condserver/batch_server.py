@@ -11,7 +11,7 @@ import torch
 from pydantic import BaseModel
 
 
-from data import tensor_to_b64_string, get_dataloader_laion_coco
+from data import tensor_to_b64_string, get_dataloader
 
 
 class BatchRequest(BaseModel):
@@ -28,8 +28,8 @@ class BatchResponse(BaseModel):
 
 
 class Arguments:
-    small_batch_size = 9
-    batch_size = 9
+    small_batch_size = 16
+    batch_size = 18
     num_workers = 8
 
     # small_batch_size = 2
@@ -41,7 +41,7 @@ class Arguments:
     # cache_dir = "/home/user/.cache"  # cache_dir for models
 
 
-dataset = get_dataloader_laion_coco(Arguments())
+dataset = get_dataloader(Arguments())
 
 
 batch_iterator = iter(dataset)

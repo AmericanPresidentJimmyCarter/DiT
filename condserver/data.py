@@ -4,7 +4,7 @@ import base64
 import json
 import torchvision
 from torch.utils.data import DataLoader
-from random import choice, randrange, seed, randint
+from random import choice, randrange, seed, randint, uniform, shuffle
 import numpy as np
 import PIL
 import math
@@ -23,7 +23,7 @@ TARGET_SIZE = 256
 URL_BATCH = 'http://127.0.0.1:4456/batch'
 URL_CONDITIONING = 'http://127.0.0.1:4455/conditionings'
 
-seed(1)
+seed(2)
 
 
 def b64_string_to_tensor(s: str) -> torch.Tensor:
@@ -57,7 +57,7 @@ def resize_image(img):
         rz_w = TARGET_SIZE
     if rz_h < TARGET_SIZE:
         rz_h = TARGET_SIZE
-    
+
     img = img.resize((rz_w, rz_h), resample=PIL.Image.LANCZOS)
 
     return img
@@ -109,18 +109,30 @@ def collate_oldbookillustrations_2(batch):
         caption_3 = i.get('image_title', None)
         caption_4 = i.get('image_description', None)
         cs = choice(list(filter(lambda x: x is not None, [
-            caption_1, 
+            caption_1,
             caption_2,
             caption_3,
             caption_4,
         ])))
         subject = i.get('illustration_subject', None)
-        if subject is not None:
+        rand_bool = uniform(0, 1) < 0.5
+        rand_bool_20_percent = uniform(0, 1) < 0.2
+
+        if subject is not None and rand_bool:
             cs = f'{subject}. {cs}'
+        if subject is not None and not rand_bool:
+            cs = f'{cs}. {subject}'
+
         tags = i.get('tags', None)
         if tags is not None:
-            tag_s = ', '.join(tags)
-            cs = f'{cs}. {tag_s}'
+            shuffle(tags)
+            tags_s = ', '.join(tags)
+            if rand_bool:
+                cs = f'{cs}. {tags_s}'
+            else:
+                cs = f'{tags_s}. {cs}'
+            if rand_bool_20_percent:
+                cs = tags_s
         captions.append(cs)
 
     captions_flat_tensor = None
@@ -142,7 +154,7 @@ def collate_oldbookillustrations_2(batch):
         import traceback
         traceback.print_exc()
         pass
-    
+
     images = torch.cat([preprocess(crop_random(resize_image(i['1600px'])))
         for i in batch], 0)
     return images, {
@@ -225,7 +237,7 @@ def collate_laion_coco(
         import traceback
         traceback.print_exc()
         pass
-    
+
     images = torch.cat([preprocess(crop_random(resize_image(i['img'])))
         for i in final_batch], 0)
     return images, {

@@ -21,12 +21,12 @@ def modulate(x, shift, scale):
 #################################################################################
 
 
-def weighted_mean(tens: torch.Tensor, weights: list[float], dim: int) -> torch.Tensor:
-    split_num = len(weights)
-    chunks = tens.split(tens.size()[dim] // split_num, dim=dim)
-    weighted_means = [torch.mean(chunks[i], dim=1) * w for
-        i, w in enumerate(weights)]
-    return torch.stack(weighted_means, dim=0).sum(dim=0) / split_num
+# def weighted_mean(tens: torch.Tensor, weights: list[float], dim: int) -> torch.Tensor:
+#     split_num = len(weights)
+#     chunks = tens.split(tens.size()[dim] // split_num, dim=dim)
+#     weighted_means = [torch.mean(chunks[i], dim=1) * w for
+#         i, w in enumerate(weights)]
+#     return torch.stack(weighted_means, dim=0).sum(dim=0) / split_num
 
 
 class ConditionedTimestepEmbedder(nn.Module):

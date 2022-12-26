@@ -164,8 +164,8 @@ def train(args):
     epoch = 0
 
     # Do less on last GPU.
-    # if accelerator.is_last_process:
-    #     args.batch_size = args.batch_size // 3
+    if accelerator.is_last_process:
+        args.batch_size = args.batch_size // 2
 
     while step < args.total_steps:
         resp_dict = None
@@ -177,6 +177,9 @@ def train(args):
         except Exception:
             import traceback
             traceback.print_exc()
+            continue
+
+        if resp is None or resp_dict is None:
             continue
 
         if 'images' not in resp_dict or resp_dict['images'] is None or \
@@ -421,12 +424,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
-    args.run_name = "ditc"
+    args.run_name = "ditc-test"
     args.model = "DiTC"
     args.dataset_type = "webdataset"
     args.total_steps = 2_000_000
     # Be sure to sync with TARGET_SIZE in utils.py and condserver/data.py
-    args.batch_size = 9 # 112
+    args.batch_size = 18 # 112
     args.image_size = 256
     args.log_period = 300
     args.extra_ckpt = 10_000
@@ -439,7 +442,7 @@ if __name__ == "__main__":
     args.num_codebook_vectors = 8192
     args.log_captions = True
     args.finetune = False
-    args.comparison_samples = 8 # 12
+    args.comparison_samples = 9 # 12
     args.cool_captions_text = [
         "a cat is sleeping",
         "a painting of a clown",
@@ -450,11 +453,11 @@ if __name__ == "__main__":
         "a frog",
         "a room with a dog in it",
         "a cat on a rooftop",
-        "a gentleman and a lady standing together",
+        # "a gentleman and a lady standing together",
     ]
     parallel_init_dir = "/data"
     args.parallel_init_file = f"file://{parallel_init_dir}/dist_file"
-    args.wandb_project = "ditc"
+    args.wandb_project = "ditc-test"
     args.wandb_entity = "mbabbins"
     # args.cache_dir = "/data/cache"  # cache_dir for models
     args.cache_dir = "/fsx/hlky/.cache"
