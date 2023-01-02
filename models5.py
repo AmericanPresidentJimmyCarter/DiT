@@ -76,10 +76,13 @@ class ConditionedTimestepEmbedder(nn.Module):
     def forward(self, t, c, c_prior):
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
 
-        t_freq_expanded = t_freq.unsqueeze(1).tile((1,77,1), 1)
-        c_prior_expanded = c_prior.unsqueeze(1).tile((1,77,1), 1)
-        c_slice_w_prior = torch.cat([t_freq_expanded, c, c_prior_expanded], dim=2)
-        t_out = self.mlp(c_slice_w_prior).mean(1)
+        # t_freq_expanded = t_freq.unsqueeze(1).tile((1,77,1), 1)
+        # c_prior_expanded = c_prior.unsqueeze(1).tile((1,77,1), 1)
+        # c_slice_w_prior = torch.cat([t_freq_expanded, c, c_prior_expanded], dim=2)
+        # t_out = self.mlp(c_slice_w_prior).mean(1)
+
+        # Testing prior.
+        t_out = self.mlp(torch.cat([t_freq, torch.zeros((c.size()[0], 2048)), c_prior], dim=1))
 
         assert t_out.size() == (c.size()[0],
             self.frequency_embedding_size + self.c_size + self.c_prior_size)
