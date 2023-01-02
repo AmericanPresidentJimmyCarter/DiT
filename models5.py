@@ -37,7 +37,7 @@ class ConditionedTimestepEmbedder(nn.Module):
         self,
         hidden_size: int,
         c_size: int,
-        c_prior_size: int=768,
+        c_prior_size: int=1024,
         frequency_embedding_size: int=256,
     ):
         super().__init__()
@@ -76,23 +76,15 @@ class ConditionedTimestepEmbedder(nn.Module):
     def forward(self, t, c, c_prior):
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
 
-        t_accumulator = torch.zeros((c.size()[0],
-            self.frequency_embedding_size + self.c_size + self.c_prior_size))
+        t_freq_expanded = t_freq.unsqueeze(1).tile((1,77,1), 1)
+        c_prior_expanded = c_prior.unsqueeze(1).tile((1,77,1), 1)
+        c_slice_w_prior = torch.cat([t_freq_expanded, c, c_prior_expanded], dim=2)
+        t_out = self.mlp(c_slice_w_prior).mean(1)
 
-        # Activations across all 77 token layers, then meaned.
-        for i in range(c.size()[1]):
-            c_slice = c[:, i, :]
-            c_slice_w_prior = torch.cat([c_slice, c_prior], dim=1)
-            t_tens = torch.cat([t_freq, c_slice_w_prior], dim=1)
-            t_out = self.mlp(t_tens)
-            t_accumulator.add_(t_out)
-            del c_slice, c_slice_w_prior, t_tens, t_out
-        t_accumulator.div_(c.size()[1])
-
-        assert t_accumulator.size() == (c.size()[0],
+        assert t_out.size() == (c.size()[0],
             self.frequency_embedding_size + self.c_size + self.c_prior_size)
-        
-        return t_accumulator
+
+        return t_out
 
 
 class LabelEmbedder(nn.Module):
@@ -140,7 +132,7 @@ class DiTBlock(nn.Module):
         cond_embed_size,
         mlp_ratio=4.0,
         frequency_embedding_size: int=256,
-        c_prior_size: int=768,
+        c_prior_size: int=1024,
         **block_kwargs,
     ):
         super().__init__()
@@ -178,7 +170,7 @@ class FinalLayer(nn.Module):
         out_channels,
         cond_size,
         frequency_embedding_size: int=256,
-        c_prior_size: int=768,
+        c_prior_size: int=1024,
     ):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -214,7 +206,7 @@ class DiT(nn.Module):
         mlp_ratio=4.0,
         learn_sigma=True,
         context_dim=2048,
-        context_prior_dim=768,
+        context_prior_dim=1024,
         skip_decay_factor=2.,
     ):
         super().__init__()
@@ -408,7 +400,7 @@ if __name__ == "__main__":
     # c_random = torch.randn((1, 2048)).to(device)
     timestep_random = torch.randint(1, 250, (NUM_IMAGES,)) # .to(device)
     c_full_random = torch.randn((NUM_IMAGES, 77, 2048)) # .to(device)
-    c_prior = torch.randn((NUM_IMAGES, 768)) # .to(device)
+    c_prior = torch.randn((NUM_IMAGES, 1024)) # .to(device)
     # c_full_random = torch.randn((1, 77, 2048)).to(device)
     # print('x random', x_random.size())
     out = model(x_random, timestep_random, c_full_random, c_prior)
