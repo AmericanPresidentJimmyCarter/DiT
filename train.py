@@ -61,11 +61,12 @@ def sample(model, vae, diff_module, conds, unconds, prior_flat, prior_flat_uncon
 
     interleaved_priors = torch.empty((prior_flat.size()[0] * 2, prior_flat.size()[1])).to(_device)
     for i in range(prior_flat.size()[0] * 2):
-        if i < conds.size()[0]:
+        if i < prior_flat.size()[0]:
             interleaved_priors[i] = prior_flat[i]
         else:
             interleaved_priors[i] = prior_flat_uncond[i // 2]
 
+    print('interleaved sizes', interleaved.size(), interleaved_priors.size())
     model_kwargs = dict(
         conditioning=interleaved,
         conditioning_prior=interleaved_priors,
@@ -182,8 +183,8 @@ def train(args):
     epoch = 0
 
     # Do less on last GPU.
-    if accelerator.is_last_process:
-        args.batch_size = args.batch_size // 2
+    # if accelerator.is_last_process:
+    #     args.batch_size = args.batch_size // 2
 
     while step < args.total_steps:
         resp_dict = None
@@ -235,7 +236,7 @@ def train(args):
         prior_flat = b64_string_to_tensor(resp_dict['prior_flat'], 'cpu')
         if prior_flat is None:
             continue
-        prior_flat = prior_flat.tile((2,1,1))[0:args.batch_size].to(device)
+        prior_flat = prior_flat.tile((2,1))[0:args.batch_size].to(device)
 
         if prior_flat is None or prior_flat is None:
             continue
@@ -244,7 +245,7 @@ def train(args):
             'cpu')
         if prior_flat_uncond is None:
             continue
-        prior_flat_uncond = prior_flat_uncond.tile((2,1,1))[0:args.batch_size].to(device)
+        prior_flat_uncond = prior_flat_uncond.tile((2,1))[0:args.batch_size].to(device)
 
         if prior_flat_uncond is None or prior_flat_uncond is None:
             continue
@@ -266,7 +267,7 @@ def train(args):
                 image_latents,
                 torch.randint(0, args.timesteps, (image_latents.size()[0],),
                     device=device),
-                model_kwargs={ 'conditioning': text_embeddings_local })
+                model_kwargs={ 'conditioning': text_embeddings_local, 'conditioning_prior': prior_flat })
             loss = torch.mean(pred['loss'])
             # print(loss, pred)
 
@@ -322,6 +323,8 @@ def train(args):
                 image_latents = image_latents[: args.comparison_samples]
                 captions = captions[: args.comparison_samples]
                 text_embeddings_full = text_embeddings_full[: args.comparison_samples]
+                prior_flat = prior_flat[: args.comparison_samples]
+                prior_flat_uncond = prior_flat_uncond[: args.comparison_samples]
                 samples = sample(maybe_unwrap_model(model), vae, diff_module,
                     text_embeddings_full, text_embeddings_full_uncond,
                     prior_flat, prior_flat_uncond,
@@ -352,7 +355,7 @@ def train(args):
                         device)
                     cool_prior_flat = b64_string_to_tensor(resp_dict['prior_flat'],
                         device)
-                    cool_prior_flat_uncond = b64_string_to_tensor(resp_dict['cool_prior_flat_uncond'],
+                    cool_prior_flat_uncond = b64_string_to_tensor(resp_dict['prior_flat_uncond'],
                         device)
 
                     # cool_captions_embeddings = generate_clip_embeddings(clip_model,
@@ -467,16 +470,16 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
-    args.run_name = "ditc-test"
+    args.run_name = "ditc-test-model5"
     args.model = "DiTC"
     args.dataset_type = "webdataset"
     args.total_steps = 2_000_000
     # Be sure to sync with TARGET_SIZE in utils.py and condserver/data.py
     args.batch_size = 18 # 112
     args.image_size = 256
-    args.log_period = 300
+    args.log_period = 150
     args.extra_ckpt = 10_000
-    args.write_every_step = 100
+    args.write_every_step = 50
     args.ema = False
     args.ema_decay = 0.9999
     args.ema_update_steps = 50_000
@@ -509,7 +512,7 @@ if __name__ == "__main__":
     args.n_nodes = 1
     args.devices = [0,1,2,3,4,5,6]
     args.timesteps = 250
-    args.loop_training_steps = 25
+    args.loop_training_steps = 50
     args.max_norm = 5.
 
     # Testing:

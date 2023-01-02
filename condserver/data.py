@@ -23,7 +23,7 @@ TARGET_SIZE = 256
 URL_BATCH = 'http://127.0.0.1:4456/batch'
 URL_CONDITIONING = 'http://127.0.0.1:4455/conditionings'
 
-seed(2)
+seed(3)
 
 
 def b64_string_to_tensor(s: str) -> torch.Tensor:
@@ -139,16 +139,20 @@ def collate_oldbookillustrations_2(batch):
     captions_full_tensor = None
     uncaptions_flat_tensor = None
     uncaptions_full_tensor = None
+    prior_flat = None
+    prior_flat_uncond = None
     try:
         captions_json_resp = requests.post(URL_CONDITIONING,
             json={'captions': captions},
-            timeout=60)
+            timeout=600)
         assert captions_json_resp.status_code == 200
         captions_json = captions_json_resp.json()
         captions_flat_tensor = b64_string_to_tensor(captions_json['flat'])
         captions_full_tensor = b64_string_to_tensor(captions_json['full'])
         uncaptions_flat_tensor = b64_string_to_tensor(captions_json['flat_uncond'])
         uncaptions_full_tensor = b64_string_to_tensor(captions_json['full_uncond'])
+        prior_flat = b64_string_to_tensor(captions_json['prior_flat'])
+        prior_flat_uncond = b64_string_to_tensor(captions_json['prior_flat_uncond'])
     except Exception as e:
         print('failed to get caption tensors', e)
         import traceback
@@ -163,6 +167,8 @@ def collate_oldbookillustrations_2(batch):
         'full': captions_full_tensor,
         'flat_uncond': uncaptions_flat_tensor,
         'full_uncond': uncaptions_full_tensor,
+        'prior_flat': prior_flat,
+        'prior_flat_uncond': prior_flat_uncond,
     }
 
 

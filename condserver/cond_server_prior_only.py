@@ -13,7 +13,7 @@ import torch
 
 from pydantic import BaseModel
 
-from oclip_prior import image_embeddings_for_text
+from oclip_prior import load_prior_model, image_embeddings_for_text
 
 from data import tensor_to_b64_string
 
@@ -40,7 +40,7 @@ class ConditioningResponse(BaseModel):
 
 
 app = FastAPI()
-
+prior = load_prior_model()
 
 
 def captions_to_conditioning_tensors(captions):
@@ -52,18 +52,18 @@ def captions_to_conditioning_tensors(captions):
     )
 
 
-def captions_to_prior_tensors(_prior_model, captions):
+def captions_to_prior_tensors(_prior, captions):
     prior_flat = None
     prior_flat_uncond = None
     with mtx_prior:
-        prior_flat = _prior_model(captions)
-        prior_flat_uncond = _prior_model([''] * len(captions))
+        prior_flat = image_embeddings_for_text(_prior, captions)
+        prior_flat_uncond = image_embeddings_for_text(_prior, [''] * len(captions))
     return (prior_flat, prior_flat_uncond)
 
 
 @app.post("/conditionings")
 def conditionings(req: ConditioningRequest) -> Response:
-    global prior_model
+    global prior
 
     try:
         flat = None
@@ -76,7 +76,7 @@ def conditionings(req: ConditioningRequest) -> Response:
             flat, full, flat_uncond, full_uncond = \
                 captions_to_conditioning_tensors(req.captions)
         prior_flat, prior_flat_uncond = \
-            image_embeddings_for_text(req.captions)
+            captions_to_prior_tensors(prior, req.captions)
         # resp = ConditioningResponse(
         #     flat=tensor_to_b64_string(flat),
         #     full=tensor_to_b64_string(full),

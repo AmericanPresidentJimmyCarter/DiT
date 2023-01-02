@@ -163,7 +163,11 @@ def captions_to_prior_tensors(_prior_model, captions):
     prior_flat_uncond = None
     with mtx_prior:
         prior_flat = _prior_model(captions)
-        prior_flat_uncond = _prior_model([''] * len(captions))
+        # This is simply too slow.
+        # prior_flat_uncond = _prior_model([''] * len(captions))
+        prior_flat_uncond = torch.randn_like(prior_flat)
+    assert prior_flat.size() == (len(captions), 768)
+    assert prior_flat_uncond.size() == (len(captions), 768)
     return (prior_flat, prior_flat_uncond)
 
 

@@ -67,9 +67,9 @@ def batch(req: BatchRequest) -> Response:
         # print('flat', flat_uncond)
         full_uncond = captions.get('full_uncond')
         # print('full', full_uncond)
-        captions = captions.get('captions')
         prior_flat = captions.get('prior_flat')
         prior_flat_uncond = captions.get('prior_flat_uncond')
+        captions = captions.get('captions')
         # resp = BatchResponse(
         #     captions=captions,
         #     images=tensor_to_b64_string(images),
